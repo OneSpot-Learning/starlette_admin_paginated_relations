@@ -69,6 +69,7 @@ from typing import Any
 
 import anyio.to_thread
 from sqlalchemy import and_
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session, joinedload
@@ -165,6 +166,51 @@ class PaginatedRelationsModelView(ModelView):
     bounded child-FK update instead of the generic whole-collection-replace
     write path. See this module's docstring for why each override exists.
     """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._validate_direct_write_relations()
+
+    def _validate_direct_write_relations(self) -> None:
+        """Catch a `relationship_name` that doesn't name a real
+        relationship on this view's model at view-construction time (app
+        startup), instead of the mistake surfacing only much later --
+        silently, as an empty result set -- from `_search`, or mid-request
+        from `_populate_obj`/`after_create`. `PaginatedHasManyRemove` is the
+        field this most commonly bites: its `.name` is just its own form
+        field id (has to be, to coexist with a same-relationship
+        `PaginatedHasMany` sibling), completely independent of the actual
+        relationship it targets, so a forgotten `relationship_name` fails
+        this check immediately rather than looking like a working field
+        that just never finds anything to remove.
+
+        Deliberately only checks that the relationship *exists* -- that's
+        all that's knowable this early, before the foreign view (needed to
+        confirm it points at the right child model, and that the FK is
+        single-column) is resolvable from `field.key` via the admin's view
+        registry. `pagination.child_fk_column` still performs that fuller
+        check lazily, at first request.
+        """
+        relationships = sa_inspect(self.model).relationships.keys()
+        for field in self.fields:
+            if (
+                isinstance(field, _DirectWriteRelation)
+                and field.relationship_name not in relationships
+            ):
+                hint = (
+                    " If this field's .name is meant to differ from the "
+                    "relationship it targets (e.g. a PaginatedHasManyRemove "
+                    "alongside a same-relationship PaginatedHasMany), pass "
+                    "relationship_name explicitly."
+                    if field.relationship_name == field.name
+                    else ""
+                )
+                raise PaginationConfigError(
+                    f"{type(field).__name__} {field.name!r} on "
+                    f"{type(self).__name__} has relationship_name="
+                    f"{field.relationship_name!r}, which is not a "
+                    f"SQLAlchemy relationship on {self.model.__name__}." + hint
+                )
 
     async def find_all(
         self,
