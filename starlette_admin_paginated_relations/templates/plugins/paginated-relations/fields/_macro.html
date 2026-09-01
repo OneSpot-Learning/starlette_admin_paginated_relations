@@ -1,0 +1,53 @@
+{# Shared by fields/list/paginated_relation.html and fields/detail/paginated_relation.html.
+   `data` is the dict PaginatedHasMany.serialize_value / plugin.py's JSON route produce:
+   {"items": [...serialized child objects...], "total": int, "page_size": int,
+    "has_next": bool, "has_previous": bool,
+    "bookmark_next": str|None, "bookmark_previous": str|None}
+   or {"error": str, "items": [], "total": 0} if the field is misconfigured.
+
+   NOTE: always index with data["items"], never data.items -- `data` is a
+   plain dict, and Jinja's dot access finds the dict.items() *method*
+   before it falls back to a key lookup, same trap as any of dict's other
+   method names (keys, values, get, update, ...). Bracket access sidesteps
+   it entirely, matching how the rest of starlette-admin's templates index
+   serialized dicts (e.g. `v["_meta"]["repr"]`).
+
+   `parent_view_key` / `parent_pk` identify the owning row for the JS pager's
+   AJAX calls; `page_url` is the base endpoint (query params appended in JS). #}
+{% macro render(data, field, parent_view_key, parent_pk, page_url) -%}
+{% set items = data["items"] %}
+<div class="sa-paginated-relation"
+     data-sa-paginated-relation
+     data-view="{{ parent_view_key }}"
+     data-field="{{ field.name }}"
+     data-pk="{{ parent_pk }}"
+     data-page-url="{{ page_url }}"
+     data-page-size="{{ data['page_size'] or '' }}"
+     data-bookmark-next="{{ data['bookmark_next'] or '' }}"
+     data-bookmark-previous="{{ data['bookmark_previous'] or '' }}">
+    {%- if data['error'] %}
+    <span class="text-danger">{{ data['error'] }}</span>
+    {%- else %}
+    <span data-sa-relation-items>
+        {%- for item in items -%}
+        <a href="{{ item["_meta"]["detailUrl"] }}">{{ item["_meta"]["repr"] }}</a>{% if not loop.last %}, {% endif %}
+        {%- else -%}
+        <span class="text-muted">{{ _("None") }}</span>
+        {%- endfor -%}
+    </span>
+    {%- if data['total'] > (items | length) or data['has_previous'] %}
+    <div class="d-flex align-items-center gap-2 small text-muted mt-1" data-sa-relation-pager>
+        <button type="button"
+                class="btn btn-sm btn-outline-secondary py-0 px-1"
+                data-sa-relation-prev
+                {{ "disabled" if not data['has_previous'] }}>&laquo; {{ _("Prev") }}</button>
+        <span data-sa-relation-range>{{ _("%(count)s of %(total)s", count=(items | length), total=data['total']) }}</span>
+        <button type="button"
+                class="btn btn-sm btn-outline-secondary py-0 px-1"
+                data-sa-relation-next
+                {{ "disabled" if not data['has_next'] }}>{{ _("Next") }} &raquo;</button>
+    </div>
+    {%- endif %}
+    {%- endif %}
+</div>
+{%- endmacro %}

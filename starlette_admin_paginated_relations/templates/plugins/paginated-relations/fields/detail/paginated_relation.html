@@ -1,0 +1,2 @@
+{% from "plugins/paginated-relations/fields/_macro.html" import render %}
+{{ render(data, field, view.key, obj[view.pk_attr], url_for(__name__ ~ ':plugin:paginated-relations:page')) }}
