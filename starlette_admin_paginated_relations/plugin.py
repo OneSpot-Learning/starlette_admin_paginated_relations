@@ -75,11 +75,6 @@ class PaginatedRelationsPlugin(BasePlugin):
         if not view.is_accessible(request):
             return JSONResponse(None, status_code=HTTP_403_FORBIDDEN)
 
-        # Child items are rendered the same way the list page's own
-        # `RelationField.serialize_value` renders them, so field-level
-        # visibility on the *child* side is governed by exclude_from_list.
-        request.state.action = RequestAction.LIST
-
         # This endpoint's own URL isn't a page a user can return to -- left
         # alone, each child's `_meta.detailUrl` would carry `_origin` back
         # to *this* JSON route (see `_carry_origin` in starlette-admin's
@@ -100,15 +95,29 @@ class PaginatedRelationsPlugin(BasePlugin):
                 f"{route_name}:list", key=view_key
             ).path
 
+        # A PaginatedHasMany field commonly sets exclude_from_list=True (full
+        # paginated relation cells belong on the detail page, not crammed
+        # into a list row) or exclude_from_detail=True. Resolve it under
+        # whichever action it's actually visible for, using get_fields_list's
+        # own `action` override so this lookup doesn't depend on -- or need
+        # to mutate -- request.state.action. Checking both keeps Prev/Next
+        # working regardless of which page the pager button was clicked from.
         field = next(
             (
                 f
-                for f in view.get_fields_list(request)
+                for f in view.get_fields_list(request, action=RequestAction.LIST)
+                if f.name == field_name and isinstance(f, PaginatedHasMany)
+            ),
+            None,
+        ) or next(
+            (
+                f
+                for f in view.get_fields_list(request, action=RequestAction.DETAIL)
                 if f.name == field_name and isinstance(f, PaginatedHasMany)
             ),
             None,
         )
-        if field is None or not view.can_access_field(request, field):
+        if field is None:
             return JSONResponse(
                 {"error": f"no accessible PaginatedHasMany field {field_name!r}"},
                 status_code=HTTP_404_NOT_FOUND,
@@ -117,6 +126,11 @@ class PaginatedRelationsPlugin(BasePlugin):
         foreign_view = view._find_foreign_view(field.key)  # noqa: SLF001
         if not foreign_view.is_accessible(request):
             return JSONResponse(None, status_code=HTTP_403_FORBIDDEN)
+
+        # Child items are rendered the same way the list page's own
+        # `RelationField.serialize_value` renders them, so field-level
+        # visibility on the *child* side is governed by exclude_from_list.
+        request.state.action = RequestAction.LIST
 
         if isinstance(view._pk_column, tuple):  # noqa: SLF001
             # Matches pagination.py's single-column-FK restriction: a
