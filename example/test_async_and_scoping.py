@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import sys
 
-from sqlalchemy import ForeignKey, select
+from sqlalchemy import ForeignKey
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
 from starlette.applications import Starlette
@@ -27,7 +27,6 @@ from deliverable.starlette_admin_paginated_relations import (
     PaginatedRelationsPlugin,
 )
 
-
 # --- 1. Async engine ---------------------------------------------------
 
 
@@ -39,7 +38,7 @@ class Author(Base):
     __tablename__ = "authors"
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str]
-    books: Mapped[list["Book"]] = relationship(back_populates="author")
+    books: Mapped[list[Book]] = relationship(back_populates="author")
 
 
 class Book(Base):
@@ -47,11 +46,15 @@ class Book(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str]
     author_id: Mapped[int] = mapped_column(ForeignKey("authors.id"))
-    author: Mapped["Author"] = relationship(back_populates="books")
+    author: Mapped[Author] = relationship(back_populates="books")
 
 
 class AuthorView(PaginatedRelationsModelView):
-    fields = [IntegerField("id"), StringField("name"), PaginatedHasMany("books", key="book", page_size=5)]
+    fields = [
+        IntegerField("id"),
+        StringField("name"),
+        PaginatedHasMany("books", key="book", page_size=5),
+    ]
 
 
 class BookView(PaginatedRelationsModelView):
@@ -59,7 +62,9 @@ class BookView(PaginatedRelationsModelView):
 
 
 def test_async_engine() -> None:
-    engine = create_async_engine("sqlite+aiosqlite:////tmp/work/deliverable/example/test_async.db")
+    engine = create_async_engine(
+        "sqlite+aiosqlite:////tmp/work/deliverable/example/test_async.db"
+    )
 
     async def seed_async():
         async with engine.begin() as conn:
@@ -102,7 +107,9 @@ def test_async_engine() -> None:
             break
         bookmark = data["bookmark_next"]
     assert len(seen) == 23, seen
-    print("[ok] async engine: paginated through all 23 books via AsyncSession + sqlakeyset.asyncio")
+    print(
+        "[ok] async engine: paginated through all 23 books via AsyncSession + sqlakeyset.asyncio"
+    )
 
 
 # --- 2. Tenant-scoping is respected -------------------------------------
@@ -114,7 +121,7 @@ class TenantBook(Base):
     title: Mapped[str]
     tenant_id: Mapped[int]
     author_id: Mapped[int] = mapped_column(ForeignKey("tenant_authors.id"))
-    author: Mapped["TenantAuthor"] = relationship(back_populates="books")
+    author: Mapped[TenantAuthor] = relationship(back_populates="books")
 
 
 class TenantAuthor(Base):
@@ -122,7 +129,7 @@ class TenantAuthor(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str]
     tenant_id: Mapped[int]
-    books: Mapped[list["TenantBook"]] = relationship(back_populates="author")
+    books: Mapped[list[TenantBook]] = relationship(back_populates="author")
 
 
 CURRENT_TENANT = {"id": 1}
@@ -192,7 +199,9 @@ def test_tenant_scoping_applies_to_paginated_relation() -> None:
         f"to the paginated relation query: {titles}"
     )
     assert data["total"] == 7, data["total"]
-    print("[ok] tenant scoping on get_list_query is respected by the paginated relation query")
+    print(
+        "[ok] tenant scoping on get_list_query is respected by the paginated relation query"
+    )
 
 
 # --- 3. Misconfigured field fails soft ----------------------------------
@@ -226,7 +235,9 @@ def test_bad_relationship_name_fails_soft() -> None:
     resp = client.get("/admin/author/list")
     assert resp.status_code == 200, resp.text  # doesn't 500 the whole page
     assert "no SQLAlchemy relationship named" in resp.text
-    print("[ok] a PaginatedHasMany naming a nonexistent relationship fails soft (visible error, no 500)")
+    print(
+        "[ok] a PaginatedHasMany naming a nonexistent relationship fails soft (visible error, no 500)"
+    )
 
 
 if __name__ == "__main__":

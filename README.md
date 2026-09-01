@@ -53,17 +53,22 @@ from starlette_admin_paginated_relations import (
     PaginatedRelationsPlugin,
 )
 
-class AuthorView(PaginatedRelationsModelView):   # <- not plain ModelView
+
+class AuthorView(PaginatedRelationsModelView):  # <- not plain ModelView
     fields = [
         IntegerField("id"),
         StringField("name"),
         PaginatedHasMany("books", key="book", page_size=10),
     ]
 
+
 class BookView(ModelView):
     fields = [IntegerField("id"), StringField("title"), HasOne("author", key="author")]
 
-admin = Admin(engine, plugins=[PaginatedRelationsPlugin()])  # <- register the plugin once
+
+admin = Admin(
+    engine, plugins=[PaginatedRelationsPlugin()]
+)  # <- register the plugin once
 admin.add_view(AuthorView(Author, key="author"))
 admin.add_view(BookView(Book, key="book"))
 ```

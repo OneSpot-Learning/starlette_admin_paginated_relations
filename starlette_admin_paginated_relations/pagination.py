@@ -16,7 +16,8 @@ from __future__ import annotations
 import anyio
 import sqlakeyset
 import sqlakeyset.asyncio as sqlakeyset_asyncio
-from sqlalchemy import func, inspect as sa_inspect, select
+from sqlalchemy import func, select
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
@@ -69,7 +70,7 @@ def _order_columns(foreign_view: object) -> tuple:
     """Return the child model's PK column(s) as a tuple, for a stable
     ORDER BY -- sqlakeyset requires the paged query to be ordered by
     (effectively) a unique key."""
-    pk_column = foreign_view._pk_column  # noqa: SLF001 -- same attribute contrib/sqla/view.py uses internally
+    pk_column = foreign_view._pk_column
     return pk_column if isinstance(pk_column, tuple) else (pk_column,)
 
 
@@ -88,7 +89,11 @@ def build_child_query(
     here -- pagination must never become a side door around it.
     """
     child_col = _child_fk_column(parent_model, relationship_name, foreign_view.model)
-    stmt = foreign_view.get_list_query(request).where(child_col == parent_pk_value).distinct()
+    stmt = (
+        foreign_view.get_list_query(request)
+        .where(child_col == parent_pk_value)
+        .distinct()
+    )
     return stmt.order_by(*_order_columns(foreign_view))
 
 
@@ -129,5 +134,7 @@ async def fetch_page(
                 session, stmt, per_page=page_size, page=bookmark
             )
         )
-        total = (await anyio.to_thread.run_sync(session.execute, count_stmt)).scalar_one()
+        total = (
+            await anyio.to_thread.run_sync(session.execute, count_stmt)
+        ).scalar_one()
     return page, total

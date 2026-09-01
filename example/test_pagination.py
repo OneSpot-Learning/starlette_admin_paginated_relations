@@ -17,7 +17,7 @@ from sqlalchemy import event
 from starlette.testclient import TestClient
 
 sys.path.insert(0, "/tmp/work/deliverable/example")
-from deliverable.example.app import Author, Book, build_admin, build_engine, seed  # noqa: E402
+from deliverable.example.app import build_admin, build_engine, seed
 
 N_BOOKS = 3000
 
@@ -41,14 +41,14 @@ def main() -> None:
     # --- 1. List page renders and doesn't choke on 3000 related rows -----
     resp = client.get("/admin/author/list")
     assert resp.status_code == 200, resp.text
-    assert 'data-sa-paginated-relation' in resp.text, "paginated widget not rendered"
+    assert "data-sa-paginated-relation" in resp.text, "paginated widget not rendered"
     assert "Book #2999" not in resp.text, "full collection got dumped into the page"
     print("[ok] list page renders, only a first page of books appears")
 
     # --- 2. Detail page for the prolific author also paginates -----------
     resp = client.get("/admin/author/detail", params={"pk": "1"})
     assert resp.status_code == 200, resp.text
-    assert 'data-sa-paginated-relation' in resp.text
+    assert "data-sa-paginated-relation" in resp.text
     print("[ok] detail page renders with paginated widget")
 
     # --- 3. Walk every page via the JSON endpoint, verify full coverage --
@@ -74,9 +74,13 @@ def main() -> None:
         bookmark = data["bookmark_next"]
         assert pages_fetched <= N_BOOKS  # safety valve against an infinite loop
 
-    assert len(seen_ids) == N_BOOKS, f"expected {N_BOOKS} unique books, saw {len(seen_ids)}"
+    assert len(seen_ids) == N_BOOKS, (
+        f"expected {N_BOOKS} unique books, saw {len(seen_ids)}"
+    )
     assert pages_fetched == N_BOOKS // 10, pages_fetched
-    print(f"[ok] paged through all {N_BOOKS} books across {pages_fetched} pages of 10, no dupes/gaps")
+    print(
+        f"[ok] paged through all {N_BOOKS} books across {pages_fetched} pages of 10, no dupes/gaps"
+    )
 
     # --- 3b. "Back to list" links on page 2+ point at the real author list
     #         page, not at this JSON route's own URL. Regression test for a
@@ -104,8 +108,12 @@ def main() -> None:
         },
     )
     detail_url = resp.json()["items"][0]["_meta"]["detailUrl"]
-    assert "_origin=%2Fadmin%2Fauthor%2Flist%3Fsort%3Dname__desc" in detail_url, detail_url
-    print("[ok] page 2+ items link back to the real author list page, not this JSON route")
+    assert "_origin=%2Fadmin%2Fauthor%2Flist%3Fsort%3Dname__desc" in detail_url, (
+        detail_url
+    )
+    print(
+        "[ok] page 2+ items link back to the real author list page, not this JSON route"
+    )
 
     # --- 4. Prev navigation from the last bookmark walks back correctly --
     resp = client.get(

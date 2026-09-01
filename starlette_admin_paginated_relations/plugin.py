@@ -43,7 +43,7 @@ class PaginatedRelationsPlugin(BasePlugin):
 
     name = "paginated-relations"
 
-    def setup(self, admin: "BaseAdmin") -> None:
+    def setup(self, admin: BaseAdmin) -> None:
         # Stashed so the route handler (a plain function, not a BaseAdmin
         # method) can reach `_find_view_by_key` the same way core's own
         # `_render_relation_lookup` does.
@@ -71,7 +71,7 @@ class PaginatedRelationsPlugin(BasePlugin):
                 {"error": "view, field, and pk are all required"}, status_code=400
             )
 
-        view = self._admin._find_view_by_key(view_key)  # noqa: SLF001
+        view = self._admin._find_view_by_key(view_key)
         if not view.is_accessible(request):
             return JSONResponse(None, status_code=HTTP_403_FORBIDDEN)
 
@@ -123,7 +123,7 @@ class PaginatedRelationsPlugin(BasePlugin):
                 status_code=HTTP_404_NOT_FOUND,
             )
 
-        foreign_view = view._find_foreign_view(field.key)  # noqa: SLF001
+        foreign_view = view._find_foreign_view(field.key)
         if not foreign_view.is_accessible(request):
             return JSONResponse(None, status_code=HTTP_403_FORBIDDEN)
 
@@ -132,7 +132,7 @@ class PaginatedRelationsPlugin(BasePlugin):
         # visibility on the *child* side is governed by exclude_from_list.
         request.state.action = RequestAction.LIST
 
-        if isinstance(view._pk_column, tuple):  # noqa: SLF001
+        if isinstance(view._pk_column, tuple):
             # Matches pagination.py's single-column-FK restriction: a
             # composite *parent* PK would need a composite FK on the child
             # side to reference it, which PaginatedHasMany doesn't support.
@@ -141,11 +141,9 @@ class PaginatedRelationsPlugin(BasePlugin):
                 status_code=400,
             )
         try:
-            parent_pk = view._pk_coerce(pk)  # noqa: SLF001
+            parent_pk = view._pk_coerce(pk)
         except (TypeError, ValueError):
             return JSONResponse({"error": f"invalid pk {pk!r}"}, status_code=400)
 
-        result = await field._serialize_page(  # noqa: SLF001
-            request, parent_pk, foreign_view, bookmark
-        )
+        result = await field._serialize_page(request, parent_pk, foreign_view, bookmark)
         return JSONResponse(result)

@@ -7,16 +7,15 @@ from __future__ import annotations
 
 import os
 
-from sqlalchemy import ForeignKey, create_engine
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-from starlette_admin.contrib.sqla import Admin, ModelView
-from starlette_admin.fields import HasOne, IntegerField, StringField
-
 from deliverable.starlette_admin_paginated_relations import (
     PaginatedHasMany,
     PaginatedRelationsModelView,
     PaginatedRelationsPlugin,
 )
+from sqlalchemy import ForeignKey, create_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from starlette_admin.contrib.sqla import Admin, ModelView
+from starlette_admin.fields import HasOne, IntegerField, StringField
 
 DB_PATH = os.environ.get("DEMO_DB_PATH", "/tmp/work/deliverable/example/demo.db")
 
@@ -30,7 +29,7 @@ class Author(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str]
-    books: Mapped[list["Book"]] = relationship(back_populates="author")
+    books: Mapped[list[Book]] = relationship(back_populates="author")
 
 
 class Book(Base):
@@ -39,7 +38,7 @@ class Book(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str]
     author_id: Mapped[int] = mapped_column(ForeignKey("authors.id"))
-    author: Mapped["Author"] = relationship(back_populates="books")
+    author: Mapped[Author] = relationship(back_populates="books")
 
 
 class AuthorView(PaginatedRelationsModelView):
@@ -59,7 +58,9 @@ class BookView(ModelView):
 
 
 def build_engine(db_path: str = DB_PATH, echo: bool = False):
-    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False}, echo=echo)
+    engine = create_engine(
+        f"sqlite:///{db_path}", connect_args={"check_same_thread": False}, echo=echo
+    )
     return engine
 
 

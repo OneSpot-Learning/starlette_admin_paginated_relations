@@ -160,9 +160,7 @@ class PaginatedHasMany(HasMany):
         parent_pk = value  # what parse_obj returned above
         foreign_view = self._view._find_foreign_view(not_none(self.key))
         bookmark = None  # first page, always, for inline list/detail rendering
-        return await self._serialize_page(
-            request, parent_pk, foreign_view, bookmark
-        )
+        return await self._serialize_page(request, parent_pk, foreign_view, bookmark)
 
     async def _serialize_page(
         self,
@@ -199,7 +197,9 @@ class PaginatedHasMany(HasMany):
             "page_size": self.page_size,
             "has_next": page.paging.has_next,
             "has_previous": page.paging.has_previous,
-            "bookmark_next": page.paging.bookmark_next if page.paging.has_next else None,
+            "bookmark_next": page.paging.bookmark_next
+            if page.paging.has_next
+            else None,
             "bookmark_previous": (
                 page.paging.bookmark_previous if page.paging.has_previous else None
             ),
