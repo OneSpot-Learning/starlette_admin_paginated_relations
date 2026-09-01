@@ -1,0 +1,30 @@
+{# Mirrors starlette-admin core's fields/form/relation.html, with two
+   deliberate differences:
+   - `data-url` points at this plugin's own `/search` route (parent-scoped,
+     text-searchable, currently-related-children-only) instead of core's
+     `relation-lookup` (unscoped, searches the whole foreign table) --
+     removing something not already related doesn't make sense.
+   - No `data-initial`: `data` here is the parent's own pk (see
+     PaginatedHasManyRemove.parse_obj/serialize_value), not a current
+     selection to pre-populate -- this field always starts empty, on
+     purpose (see fields.py's module docstring).
+   `field._view` is the owning BaseModelView, set by starlette-admin during
+   `BaseModelView.__init__`; used here the same way core templates already
+   reach into private view/field attributes (e.g. `field.key | to_view`). #}
+{% set foreign_view = (field.key | to_view) %}
+{% set fpk = foreign_view.pk_attr %}
+{% set describedby = ((field.id ~ '-error') if error else None, (field.id ~ '-help') if field.help_text else None) | select | join(' ') %}
+<div class="{% if error %}{{ cls(field.error_class) }}{% endif %}">
+    <select data-allow-clear="true"
+            data-placeholder="{{ _('Search %(name)s to remove', name=field.id) }}"
+            id="{{ field.id }}"
+            name="{{ field.id }}"
+            {% if error %}aria-invalid="true"{% endif %}
+            {% if describedby %}aria-describedby="{{ describedby }}"{% endif %}
+            class="form-control field-has-many {% if error %}{{ cls(field.error_class) }}{% endif %}"
+            data-url="{{ url_for(__name__ ~ ':plugin:paginated-relations:search') }}?{{ {'view': field._view.key, 'field': field.name, 'pk': data} | urlencode }}"
+            data-pk="{{ fpk }}"
+            multiple></select>
+    {% if field.help_text %}<small class="form-hint mt-2" id="{{ field.id }}-help">{{ field.help_text }}</small>{% endif %}
+</div>
+{% include "fields/form/_error.html" %}

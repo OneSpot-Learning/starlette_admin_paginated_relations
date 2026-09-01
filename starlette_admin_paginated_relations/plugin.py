@@ -14,6 +14,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import anyio.to_thread
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
@@ -21,7 +24,8 @@ from starlette.status import HTTP_403_FORBIDDEN, HTTP_404_NOT_FOUND
 from starlette_admin.plugins import BasePlugin
 from starlette_admin.types import RequestAction
 
-from .fields import PaginatedHasMany
+from .fields import PaginatedHasMany, PaginatedHasManyRemove
+from .pagination import PaginationConfigError, build_child_query
 
 if TYPE_CHECKING:
     from starlette_admin.base import BaseAdmin
@@ -34,23 +38,31 @@ class PaginatedRelationsPlugin(BasePlugin):
     admin = Admin(engine, plugins=[PaginatedRelationsPlugin()])
     ```
 
-    Contributes exactly one thing beyond the bundled templates/static/JS
-    that `BasePlugin`'s folder convention picks up automatically: the JSON
-    route the JS pager calls for page 2 onward. Page 1 is always rendered
-    inline by `PaginatedHasMany.serialize_value` as part of the normal
-    list/detail response, so this route is never hit on first paint.
+    Contributes two things beyond the bundled templates/static/JS that
+    `BasePlugin`'s folder convention picks up automatically: the JSON route
+    the JS pager calls for page 2 onward of `PaginatedHasMany` (page 1 is
+    always rendered inline by `PaginatedHasMany.serialize_value` as part of
+    the normal list/detail response, so `/page` is never hit on first
+    paint), and the JSON route `PaginatedHasManyRemove`'s edit-form select
+    searches -- a parent-scoped, text-searchable source of *currently
+    related* children only, in the same response shape core's own
+    `relation-lookup` endpoint uses, so the same select2 wiring works
+    unmodified against it.
     """
 
     name = "paginated-relations"
 
     def setup(self, admin: BaseAdmin) -> None:
-        # Stashed so the route handler (a plain function, not a BaseAdmin
-        # method) can reach `_find_view_by_key` the same way core's own
+        # Stashed so the route handlers (plain functions, not BaseAdmin
+        # methods) can reach `_find_view_by_key` the same way core's own
         # `_render_relation_lookup` does.
         self._admin = admin
 
     def routes(self) -> list[Route]:
-        return [Route("/page", self._page, methods=["GET"], name="page")]
+        return [
+            Route("/page", self._page, methods=["GET"], name="page"),
+            Route("/search", self._search, methods=["GET"], name="search"),
+        ]
 
     async def _page(self, request: Request) -> Response:
         """`GET /plugins/paginated-relations/page?view=<key>&field=<name>&pk=<pk>[&page=<bookmark>]`
@@ -147,3 +159,113 @@ class PaginatedRelationsPlugin(BasePlugin):
 
         result = await field._serialize_page(request, parent_pk, foreign_view, bookmark)
         return JSONResponse(result)
+
+    async def _search(self, request: Request) -> Response:
+        """`GET /plugins/paginated-relations/search?view=<key>&field=<name>&pk=<pk>[&q=<term>&skip=<n>&limit=<n>]`
+
+        Powers `PaginatedHasManyRemove`'s edit-form select: unlike core's
+        `relation-lookup` (searches the *whole* foreign table, for picking
+        something to relate), this searches only children *currently*
+        related to this specific parent, since removing something not
+        already related is meaningless. Response shape matches
+        `relation-lookup` exactly (`{"items": [...], "total": ...}`, each
+        item including `_meta.select2`), so the same generic select2 AJAX
+        wiring in starlette-admin's `form.js` works against this URL
+        unmodified.
+        """
+        params = request.query_params
+        view_key = params.get("view")
+        field_name = params.get("field")
+        pk = params.get("pk")
+        if not view_key or not field_name or pk is None:
+            return JSONResponse(
+                {"error": "view, field, and pk are all required"}, status_code=400
+            )
+
+        view = self._admin._find_view_by_key(view_key)
+        if not view.is_accessible(request):
+            return JSONResponse(None, status_code=HTTP_403_FORBIDDEN)
+
+        # PaginatedHasManyRemove is edit-only by design (fields.py), so
+        # there's only one action to resolve it under -- no LIST/DETAIL
+        # fallback like `/page` needs for PaginatedHasMany.
+        field = next(
+            (
+                f
+                for f in view.get_fields_list(request, action=RequestAction.EDIT)
+                if f.name == field_name and isinstance(f, PaginatedHasManyRemove)
+            ),
+            None,
+        )
+        if field is None:
+            return JSONResponse(
+                {"error": f"no accessible PaginatedHasManyRemove field {field_name!r}"},
+                status_code=HTTP_404_NOT_FOUND,
+            )
+
+        foreign_view = view._find_foreign_view(field.key)
+        if not foreign_view.is_accessible(request):
+            return JSONResponse(None, status_code=HTTP_403_FORBIDDEN)
+
+        if isinstance(view._pk_column, tuple):
+            return JSONResponse(
+                {
+                    "error": "PaginatedHasManyRemove does not support composite parent keys"
+                },
+                status_code=400,
+            )
+        try:
+            parent_pk = view._pk_coerce(pk)
+        except (TypeError, ValueError):
+            return JSONResponse({"error": f"invalid pk {pk!r}"}, status_code=400)
+
+        q = params.get("q") or None
+        try:
+            skip = max(int(params.get("skip") or 0), 0)
+            limit = min(max(int(params.get("limit") or 20), 1), 100)
+        except ValueError:
+            return JSONResponse(
+                {"error": "skip and limit must be integers"}, status_code=400
+            )
+
+        # Matches core's relation-lookup: the items in the response are
+        # serialized under RELATION_LOOKUP, so field-level visibility on the
+        # *child* side (exclude_from_list) governs what's shown here too.
+        request.state.action = RequestAction.RELATION_LOOKUP
+        try:
+            stmt = build_child_query(
+                request, view.model, field.relationship_name, foreign_view, parent_pk
+            )
+        except PaginationConfigError as exc:
+            return JSONResponse({"error": str(exc), "items": [], "total": 0})
+        if q:
+            stmt = stmt.where(
+                await foreign_view.build_full_text_search_query(
+                    request, q, foreign_view.model
+                )
+            )
+
+        session = request.state.session
+        count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
+        paged_stmt = stmt.offset(skip).limit(limit)
+        if isinstance(session, AsyncSession):
+            items = (await session.execute(paged_stmt)).scalars().unique().all()
+            total = (await session.execute(count_stmt)).scalar_one()
+        else:
+            items = (
+                (await anyio.to_thread.run_sync(session.execute, paged_stmt))
+                .scalars()
+                .unique()
+                .all()
+            )
+            total = (
+                await anyio.to_thread.run_sync(session.execute, count_stmt)
+            ).scalar_one()
+
+        serialized_items = [
+            await foreign_view.serialize(
+                item, request, include_relationships=False, include_select2=True
+            )
+            for item in items
+        ]
+        return JSONResponse({"items": serialized_items, "total": total})

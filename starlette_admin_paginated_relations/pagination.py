@@ -31,13 +31,16 @@ class PaginationConfigError(ValueError):
     view/field, and surfaces as a 400 rather than crashing the process."""
 
 
-def _child_fk_column(parent_model: type, relationship_name: str, child_model: type):
+def child_fk_column(parent_model: type, relationship_name: str, child_model: type):
     """Return the child-side FK `Column` for `parent_model.<relationship_name>`.
 
     Unlike a generic "find some relationship pointing at this model" scan,
     this looks up the *exact* relationship the field already names via
-    `relationship_name` (the field's own `.name`), so there's no ambiguity
-    even when two relationships connect the same pair of models.
+    `relationship_name` (a `PaginatedHasMany`/`PaginatedHasManyRemove`
+    field's `.relationship_name`), so there's no ambiguity even when two
+    relationships connect the same pair of models. Shared by the read side
+    (this module) and the write side (`view_mixin.py`'s direct FK add/remove
+    helper), so both agree on exactly which column governs the relationship.
     """
     mapper = sa_inspect(parent_model)
     try:
@@ -88,7 +91,7 @@ def build_child_query(
     (tenant filters, soft-delete filters, access control, ...) still applies
     here -- pagination must never become a side door around it.
     """
-    child_col = _child_fk_column(parent_model, relationship_name, foreign_view.model)
+    child_col = child_fk_column(parent_model, relationship_name, foreign_view.model)
     stmt = (
         foreign_view.get_list_query(request)
         .where(child_col == parent_pk_value)

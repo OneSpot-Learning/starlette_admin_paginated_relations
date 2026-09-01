@@ -45,19 +45,46 @@ Prev/Next (see `static/plugins/paginated-relations/js/paginated_relation.js`).
   which are specific to `starlette_admin.contrib.sqla`.
 * **Single-column foreign keys only.** A composite FK raises
   `PaginationConfigError` at request time; use plain `HasMany` for those.
-* **Create/edit forms are unaffected.** `HasMany`'s existing multi-select
-  widget already paginates and searches via the built-in
-  `relation-lookup` endpoint (see `starlette_admin/base.py`), which is not
-  the bottleneck this field addresses. Because pre-selecting the *current*
-  value in an edit form still requires knowing every currently-related pk
-  (the same unbounded-load problem, just for the form instead of the list),
-  `PaginatedHasMany` defaults `exclude_from_create` / `exclude_from_edit` /
-  `exclude_from_export` to `True`. Pass `exclude_from_edit=False` etc.
-  explicitly if you've decided that trade-off is fine for a given field --
-  it then falls back to `HasMany`'s normal (unbounded) behavior for that
-  action only.
-* **No search-within-relation.** Only Prev/Next paging; add a `q` param to
-  `pagination.build_child_query` if you need it later.
+* **Export.** A CSV/Excel/JSON row still needs the full related collection
+  to represent it, which is exactly the cost this field avoids elsewhere, so
+  `exclude_from_export` stays `True`. Pass `exclude_from_export=False`
+  explicitly if that trade-off is fine for a given field -- it then falls
+  back to `HasMany`'s normal (unbounded) behavior for that action only.
+
+## Create/edit: add-only and remove-only, never a full-collection replace
+
+`HasMany`'s own multi-select widget already searches and paginates its
+*options* via the built-in `relation-lookup` endpoint (see
+`starlette_admin/base.py`) -- that was never the bottleneck. The bottleneck
+was pre-selecting the *current* value: showing what's already related
+requires loading it, the same unbounded read this field exists to avoid,
+just on the form instead of the list.
+
+So `PaginatedHasMany`'s create/edit widget (`parse_obj`, below) simply never
+pre-loads or shows the current selection -- it always starts empty. Picking
+children in it and submitting only **adds** those children to the
+relationship; anything already related, shown or not, is left alone. This
+is also why a plain `HasMany`-style submit (which replaces the *entire*
+collection with whatever the form posts) would be actively wrong here: with
+no current selection loaded, a "replace" write would silently orphan every
+child not re-picked in this one visit. `PaginatedRelationsModelView`
+(`view_mixin.py`) intercepts the write instead, applying it as a direct,
+bounded child-FK update -- see that module for the mechanics.
+
+`PaginatedHasManyRemove` is the mirror image for the same relationship:
+also a search-as-you-type select that starts empty, but **subtractive**
+only -- picking a child unrelates it (nulls its FK) if it's currently
+related, and does nothing otherwise. It only makes sense on an edit form
+(there's nothing to remove from a not-yet-created parent), so it's excluded
+from create/list/detail/export unconditionally. Because it targets the same
+relationship as a `PaginatedHasMany` field but needs its own distinct form
+field id, its `.name` is just that id -- point `relationship_name` at the
+real SQLAlchemy relationship name explicitly if it differs (it defaults to
+`.name`, so a lone `PaginatedHasManyRemove` with no sibling add-field can
+skip it, same as `PaginatedHasMany`). It searches only children *currently*
+related to this parent, through `PaginatedRelationsPlugin`'s `/search`
+route -- never the whole foreign table -- since removing something not
+already related is meaningless.
 
 ## Usage
 
@@ -120,13 +147,27 @@ class PaginatedHasMany(HasMany):
     detail_template: str = (
         "plugins/paginated-relations/fields/detail/paginated_relation.html"
     )
-    # See "What's out of scope" above: these three actions would otherwise
-    # still force a full, unbounded load of the relationship (to pre-select
-    # current values, or to export every related row). Override explicitly
-    # per-field if that trade-off is acceptable for a given relationship.
-    exclude_from_create: bool | None = True
-    exclude_from_edit: bool | None = True
+    # Create/edit render as a search-as-you-type select (core HasMany's own
+    # relation-lookup widget, unmodified) that never pre-loads the current
+    # selection -- see `parse_obj` below -- and whose submission is handled
+    # by `PaginatedRelationsModelView._populate_obj` as an *add-only* write:
+    # picked children get related to this parent; nothing already related
+    # is ever touched, so this never has to pay for the unbounded load a
+    # normal HasMany's replace-the-whole-collection write would need to
+    # avoid clobbering what it can't see. Export still would need the full
+    # collection, so that stays excluded by default.
+    exclude_from_create: bool | None = False
+    exclude_from_edit: bool | None = False
     exclude_from_export: bool | None = True
+
+    @property
+    def relationship_name(self) -> str:
+        """The SQLAlchemy relationship this field writes to. Always `.name`
+        for `PaginatedHasMany` itself; exists so write-path code in
+        `view_mixin.py` can treat this and `PaginatedHasManyRemove` (whose
+        `.name` is its own form field id, independent of the relationship it
+        targets) identically."""
+        return self.name
 
     def additional_js_links(self, request: Request) -> list[str]:
         if request.state.action in (RequestAction.LIST, RequestAction.DETAIL):
@@ -149,6 +190,13 @@ class PaginatedHasMany(HasMany):
                 "used inside a BaseModelView"
             )
             return await self._view.get_pk_value(request, obj)
+        if request.state.action in (RequestAction.CREATE, RequestAction.EDIT):
+            # Same reasoning as above, for the same reason: the create/edit
+            # widget starts empty rather than paying to pre-load and show
+            # every currently-related child. `[]`, not `None` -- the base
+            # RelationField.serialize_value this flows into iterates the
+            # value directly for form rendering.
+            return []
         return await super().parse_obj(request, obj)
 
     async def serialize_value(self, request: Request, value: Any) -> Any:
@@ -204,3 +252,62 @@ class PaginatedHasMany(HasMany):
                 page.paging.bookmark_previous if page.paging.has_previous else None
             ),
         }
+
+
+@dataclass
+class PaginatedHasManyRemove(HasMany):
+    """A search-as-you-type select, for an edit form only, that *unrelates*
+    already-related children -- the subtractive mirror of `PaginatedHasMany`.
+
+    Parameters:
+        relationship_name: The actual SQLAlchemy relationship name on the
+            parent model. Defaults to `.name`, same as `PaginatedHasMany` --
+            set this explicitly when a sibling `PaginatedHasMany` field
+            already owns that name, since two fields on one view can't share
+            a `.name` (it's also the HTML form field id).
+
+    See this module's docstring ("Create/edit: add-only and remove-only...")
+    for the full rationale. In short: picking a child here and submitting
+    the form nulls that child's FK if it's currently related to this parent,
+    and does nothing if it isn't -- it never adds a relation, and it never
+    touches any child not explicitly picked. The write itself is handled by
+    `PaginatedRelationsModelView._populate_obj` (`view_mixin.py`), the same
+    place that handles `PaginatedHasMany`'s add-only write.
+    """
+
+    relationship_name: str | None = None
+    form_template: str = (
+        "plugins/paginated-relations/fields/form/paginated_relation_remove.html"
+    )
+    # Only ever meaningful on an edit form: there's no relationship yet on
+    # a not-created parent, and list/detail/export all read existing state
+    # rather than offer to change it.
+    exclude_from_list: bool = True
+    exclude_from_detail: bool = True
+    exclude_from_create: bool = True
+    exclude_from_edit: bool = False
+    exclude_from_export: bool = True
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.relationship_name is None:
+            self.relationship_name = self.name
+
+    async def parse_obj(self, request: Request, obj: Any) -> Any:
+        if request.state.action == RequestAction.EDIT:
+            # Same reasoning as PaginatedHasMany.parse_obj: never load the
+            # current collection just to render this field. What's returned
+            # here becomes `data` in the form template, which only needs
+            # this parent's own pk to scope its search endpoint -- not the
+            # list of currently-related children.
+            assert self._view is not None, (
+                f"PaginatedHasManyRemove {self.name!r} has no _view; it "
+                "must be used inside a BaseModelView"
+            )
+            return await self._view.get_pk_value(request, obj)
+        return []
+
+    async def serialize_value(self, request: Request, value: Any) -> Any:
+        if request.state.action == RequestAction.EDIT:
+            return value  # the parent pk from parse_obj, passed through as-is
+        return await super().serialize_value(request, value)
