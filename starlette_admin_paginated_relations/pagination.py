@@ -89,7 +89,6 @@ def build_child_query(
     """
     child_col = _child_fk_column(parent_model, relationship_name, foreign_view.model)
     stmt = foreign_view.get_list_query(request).where(child_col == parent_pk_value)
-    stmt = stmt.distinct()
     return stmt.order_by(*_order_columns(foreign_view))
 
 

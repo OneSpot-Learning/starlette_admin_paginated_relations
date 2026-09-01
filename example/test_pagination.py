@@ -78,6 +78,35 @@ def main() -> None:
     assert pages_fetched == N_BOOKS // 10, pages_fetched
     print(f"[ok] paged through all {N_BOOKS} books across {pages_fetched} pages of 10, no dupes/gaps")
 
+    # --- 3b. "Back to list" links on page 2+ point at the real author list
+    #         page, not at this JSON route's own URL. Regression test for a
+    #         bug where every item's `_meta.detailUrl` carried `_origin`
+    #         back to `/admin/plugins/paginated-relations/page` -- a URL
+    #         that returns JSON, not a page -- because `request.url` inside
+    #         the route handler is the API call itself, not whatever page
+    #         the user was actually looking at.
+    resp = client.get(
+        "/admin/plugins/paginated-relations/page",
+        params={"view": "author", "field": "books", "pk": "1"},
+    )
+    detail_url = resp.json()["items"][0]["_meta"]["detailUrl"]
+    assert "paginated-relations" not in detail_url, detail_url
+    assert "_origin=%2Fadmin%2Fauthor%2Flist" in detail_url, detail_url
+    # And when the client (the real JS pager) supplies the page it's
+    # actually on, that exact path wins instead of the generic fallback.
+    resp = client.get(
+        "/admin/plugins/paginated-relations/page",
+        params={
+            "view": "author",
+            "field": "books",
+            "pk": "1",
+            "origin": "/admin/author/list?sort=name__desc",
+        },
+    )
+    detail_url = resp.json()["items"][0]["_meta"]["detailUrl"]
+    assert "_origin=%2Fadmin%2Fauthor%2Flist%3Fsort%3Dname__desc" in detail_url, detail_url
+    print("[ok] page 2+ items link back to the real author list page, not this JSON route")
+
     # --- 4. Prev navigation from the last bookmark walks back correctly --
     resp = client.get(
         "/admin/plugins/paginated-relations/page",

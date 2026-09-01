@@ -1,10 +1,22 @@
 /* Prev/Next pager for PaginatedHasMany fields.
  *
- * Follows the plugin frontend contract from starlette-admin's "Plugins" doc:
- * query only inside the `container` passed to the initializer (never the
- * global `document`), be idempotent (core reruns initializers after every
- * inline-row / fragment insert), and read configuration from data-*
- * attributes rendered by fields/_macro.html.
+ * NOTE: this deliberately does NOT use starlette-admin's
+ * `window.StarletteAdmin.registerFieldInitializer` plugin hook, even though
+ * that's the pattern the "Plugins" doc describes. In practice
+ * `registerFieldInitializer` only exists once `static/js/form.js` has
+ * loaded, and core only loads `form.js` on the list page when the view has
+ * inline-editable fields enabled (`list.html`'s `{% if inline_edit_enabled %}`
+ * guard) -- and never on the plain detail page at all. PaginatedHasMany is
+ * neither inline-editable nor a form field, so on a typical list/detail
+ * page `window.StarletteAdmin.registerFieldInitializer` simply doesn't
+ * exist, and calling it throws before any click handler is ever attached
+ * (the "Next button doesn't work" bug this file used to have).
+ *
+ * Instead: one delegated click listener on `document`, bound once. This
+ * needs no per-element re-initialization at all -- delegation means a
+ * `[data-sa-paginated-relation]` container inserted later (e.g. core
+ * replacing a whole `<tr>` after an inline edit of some *other* field on
+ * the same row) is handled automatically, with no re-scan step to forget.
  */
 (function () {
   "use strict";
@@ -73,6 +85,10 @@
     url.searchParams.set("view", container.dataset.view);
     url.searchParams.set("field", container.dataset.field);
     url.searchParams.set("pk", container.dataset.pk);
+    // So links rendered on this page ("back to list") point at the real
+    // page the user is looking at, not at this JSON endpoint's own URL --
+    // see plugin.py's `origin` handling.
+    url.searchParams.set("origin", window.location.pathname + window.location.search);
     if (bookmark) {
       url.searchParams.set("page", bookmark);
     } else {
@@ -101,23 +117,25 @@
       });
   }
 
-  function initPaginatedRelation(container) {
-    if (container.dataset.saBound) return;
-    container.dataset.saBound = "1";
-    container.addEventListener("click", function (evt) {
-      var prevBtn = evt.target.closest("[data-sa-relation-prev]");
-      var nextBtn = evt.target.closest("[data-sa-relation-next]");
-      if (prevBtn && !prevBtn.disabled) {
-        fetchPage(container, container.dataset.bookmarkPrevious);
-      } else if (nextBtn && !nextBtn.disabled) {
-        fetchPage(container, container.dataset.bookmarkNext);
-      }
-    });
-  }
+  // Guard against this script somehow being included twice on one page
+  // (e.g. once for a list field, once for a detail field) -- a delegated
+  // listener doesn't need re-binding per element, but it does need to not
+  // be attached twice over.
+  if (window.__saPaginatedRelationBound) return;
+  window.__saPaginatedRelationBound = true;
 
-  window.StarletteAdmin.registerFieldInitializer(function (element) {
-    element
-      .querySelectorAll("[data-sa-paginated-relation]")
-      .forEach(initPaginatedRelation);
+  document.addEventListener("click", function (evt) {
+    var prevBtn = evt.target.closest("[data-sa-relation-prev]");
+    var nextBtn = evt.target.closest("[data-sa-relation-next]");
+    var btn = prevBtn || nextBtn;
+    if (!btn || btn.disabled) return;
+
+    var container = btn.closest("[data-sa-paginated-relation]");
+    if (!container) return;
+
+    var bookmark = prevBtn
+      ? container.dataset.bookmarkPrevious
+      : container.dataset.bookmarkNext;
+    fetchPage(container, bookmark);
   });
 })();

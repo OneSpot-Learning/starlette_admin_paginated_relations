@@ -80,6 +80,26 @@ class PaginatedRelationsPlugin(BasePlugin):
         # visibility on the *child* side is governed by exclude_from_list.
         request.state.action = RequestAction.LIST
 
+        # This endpoint's own URL isn't a page a user can return to -- left
+        # alone, each child's `_meta.detailUrl` would carry `_origin` back
+        # to *this* JSON route (see `_carry_origin` in starlette-admin's
+        # helpers.py). `origin` is the page the pager button was actually
+        # clicked from, forwarded by the JS as
+        # `location.pathname + location.search`; accept it only as a
+        # same-origin relative path (never `//host/...`, which browsers
+        # treat as protocol-relative to another host) to avoid turning this
+        # into an open redirect, and fall back to the parent view's bare
+        # list page otherwise (no sort/filter state to preserve here, since
+        # this endpoint never had it in the first place).
+        origin = params.get("origin")
+        if origin and origin.startswith("/") and not origin.startswith("//"):
+            request.state.origin_override = origin
+        else:
+            route_name = request.app.state.ROUTE_NAME
+            request.state.origin_override = request.url_for(
+                f"{route_name}:list", key=view_key
+            ).path
+
         field = next(
             (
                 f
