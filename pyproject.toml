@@ -1,6 +1,6 @@
 [project]
 name = "starlette-admin-paginated-relations"
-version = "0.1.1"
+version = "v0.1.2"
 description = "A PaginatedHasMany field for starlette-admin: paginates a has-many relation's list/detail rendering instead of loading the full collection."
 requires-python = ">=3.11"
 dependencies = [
