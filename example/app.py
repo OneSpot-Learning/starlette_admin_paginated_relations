@@ -12,7 +12,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from starlette_admin.contrib.sqla import Admin, ModelView
 from starlette_admin.fields import HasOne, IntegerField, StringField
 
-from starlette_admin_paginated_relations import (
+from deliverable.starlette_admin_paginated_relations import (
     PaginatedHasMany,
     PaginatedRelationsModelView,
     PaginatedRelationsPlugin,

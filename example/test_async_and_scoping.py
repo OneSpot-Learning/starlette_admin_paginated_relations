@@ -21,7 +21,7 @@ from starlette_admin.contrib.sqla import Admin
 from starlette_admin.fields import IntegerField, StringField
 
 sys.path.insert(0, "/tmp/work/deliverable/example")
-from starlette_admin_paginated_relations import (
+from deliverable.starlette_admin_paginated_relations import (
     PaginatedHasMany,
     PaginatedRelationsModelView,
     PaginatedRelationsPlugin,

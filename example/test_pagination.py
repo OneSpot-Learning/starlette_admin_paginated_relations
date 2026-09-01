@@ -17,7 +17,7 @@ from sqlalchemy import event
 from starlette.testclient import TestClient
 
 sys.path.insert(0, "/tmp/work/deliverable/example")
-from app import Author, Book, build_admin, build_engine, seed  # noqa: E402
+from deliverable.example.app import Author, Book, build_admin, build_engine, seed  # noqa: E402
 
 N_BOOKS = 3000
 
