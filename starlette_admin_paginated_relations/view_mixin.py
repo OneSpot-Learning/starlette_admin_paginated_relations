@@ -35,10 +35,11 @@ mode for a different reason: a bare `getattr(obj, field.name)` over every
 field, unconditionally. This subclass reimplements `_arrange_data`,
 `_populate_obj`, `edit`, and `after_create` (the last one lightly -- see its
 docstring) with one added branch each, so these fields write via a direct,
-bounded child-FK update (`_add_or_remove_children`) instead. `can_access_field`
-gets a small, non-copied override on top, to keep these fields out of the
-list page's separate inline-edit write path, which none of the above
-intercepts.
+bounded update instead (`_add_or_remove_children`: a child-FK column write
+for a direct relationship, or an insert/delete against the association
+table for a many-to-many one). `can_access_field` gets a small, non-copied
+override on top, to keep these fields out of the list page's separate
+inline-edit write path, which none of the above intercepts.
 
 ## Coupling / maintenance note
 
@@ -68,7 +69,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import anyio.to_thread
-from sqlalchemy import and_
+from sqlalchemy import and_, select
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -84,14 +85,14 @@ from starlette_admin.tools import iterdecode
 from starlette_admin.types import RequestAction
 
 from .fields import PaginatedHasMany, PaginatedHasManyRemove
-from .pagination import PaginationConfigError, child_fk_column
+from .pagination import PaginationConfigError, RelationshipMapping, resolve_relationship
 
 _log = get_logger(__name__)
 
 #: A `PaginatedHasMany`/`PaginatedHasManyRemove` field never goes through
 #: the generic relation-field write path (see `_populate_obj` below) -- both
-#: write directly to the child-side FK column for a bounded set of children
-#: instead of replacing the whole ORM-managed collection.
+#: write directly against a bounded set of children instead of replacing the
+#: whole ORM-managed collection (see `_add_or_remove_children`).
 _DirectWriteRelation = (PaginatedHasMany, PaginatedHasManyRemove)
 
 
@@ -110,37 +111,48 @@ def _eager_loadable(field: object) -> bool:
 async def _add_or_remove_children(
     request: Request,
     foreign_view: Any,
-    child_col: Any,
+    mapping: RelationshipMapping,
     parent_pk_value: Any,
     child_pks: Sequence[Any],
     *,
     relate: bool,
 ) -> None:
     """Add or remove a bounded set of children to/from one parent's HasMany
-    relationship by writing the child-side FK column directly.
+    relationship -- by writing the child-side FK column directly for a
+    direct one-to-many relationship, or by inserting/deleting rows in the
+    association table for a many-to-many one (`mapping.is_many_to_many`).
 
     Deliberately never touches the ORM-managed collection attribute (`obj.books
     = [...]`), so children not named in `child_pks` are never affected --
     the same guarantee `PaginatedHasMany`'s read side makes, extended to the
     write side. `foreign_view.find_by_pks` bounds the load to exactly the
-    submitted pks, never the full relationship.
+    submitted pks (also enforcing the child view's own access/scoping, same
+    as any other write path here), never the full relationship.
 
-    `relate=True` (`PaginatedHasMany`): set each child's FK to
-    `parent_pk_value`, skipping any child that's already set to it.
-    `relate=False` (`PaginatedHasManyRemove`): null each child's FK, but
-    only where it currently equals `parent_pk_value` -- a child related to
-    some *other* parent, or not related at all, is left untouched.
+    `relate=True` (`PaginatedHasMany`): relate each child to `parent_pk_value`,
+    skipping any child that's already related. `relate=False`
+    (`PaginatedHasManyRemove`): unrelate each child, but only where it's
+    currently related to `parent_pk_value` -- a child related to some
+    *other* parent, or not related at all, is left untouched.
     """
     if not child_pks:
         return
+    children = await foreign_view.find_by_pks(request, list(child_pks))
+    if not children:
+        return
+    session: Session | AsyncSession = request.state.session
+    if mapping.is_many_to_many:
+        await _add_or_remove_children_m2m(
+            request, foreign_view, mapping, parent_pk_value, children, relate=relate
+        )
+        return
+    child_col = mapping.child_fk_column
     if not relate and not child_col.nullable:
         raise PaginationConfigError(
             f"{child_col.table.name}.{child_col.name} is NOT NULL -- "
             "PaginatedHasManyRemove can't unrelate a child without a "
             "nullable foreign key column."
         )
-    children = await foreign_view.find_by_pks(request, list(child_pks))
-    session: Session | AsyncSession = request.state.session
     dirty = False
     for child in children:
         current = getattr(child, child_col.key)
@@ -158,13 +170,72 @@ async def _add_or_remove_children(
         await anyio.to_thread.run_sync(session.flush)
 
 
+async def _execute(session: Session | AsyncSession, stmt: Any) -> Any:
+    """Run one Core statement on whichever session flavor this request has,
+    mirroring the sync/async duality `contrib/sqla/view.py` uses throughout."""
+    if isinstance(session, AsyncSession):
+        return await session.execute(stmt)
+    return await anyio.to_thread.run_sync(session.execute, stmt)
+
+
+async def _add_or_remove_children_m2m(
+    request: Request,
+    foreign_view: Any,
+    mapping: RelationshipMapping,
+    parent_pk_value: Any,
+    children: Sequence[Any],
+    *,
+    relate: bool,
+) -> None:
+    """The many-to-many half of `_add_or_remove_children`: instead of a
+    child-side FK column to flip, the relationship lives entirely in
+    `mapping.secondary` (the association table), so "related" means "a row
+    exists there for (parent_pk_value, child_pk)". Operates on that table
+    directly via Core insert/delete -- never touches an ORM collection
+    attribute (which would need the *current* collection loaded first to
+    know what to preserve, the exact cost this library exists to avoid).
+    """
+    child_col = mapping.secondary_child_column
+    parent_col = mapping.secondary_parent_column
+    child_pk_values = [await foreign_view.get_pk_value(request, c) for c in children]
+
+    session: Session | AsyncSession = request.state.session
+    existing_stmt = select(child_col).where(
+        parent_col == parent_pk_value, child_col.in_(child_pk_values)
+    )
+    already_related = set((await _execute(session, existing_stmt)).scalars().all())
+
+    if relate:
+        to_add = [v for v in child_pk_values if v not in already_related]
+        if not to_add:
+            return
+        await _execute(
+            session,
+            mapping.secondary.insert().values(
+                [{parent_col.key: parent_pk_value, child_col.key: v} for v in to_add]
+            ),
+        )
+    else:
+        to_remove = [v for v in child_pk_values if v in already_related]
+        if not to_remove:
+            return
+        await _execute(
+            session,
+            mapping.secondary.delete().where(
+                parent_col == parent_pk_value, child_col.in_(to_remove)
+            ),
+        )
+
+
 class PaginatedRelationsModelView(ModelView):
     """Drop-in replacement for `starlette_admin.contrib.sqla.ModelView`
     that: skips the automatic eager-join for `PaginatedHasMany` fields on
     read (leaving it in place for every other relation field), and routes
     `PaginatedHasMany`/`PaginatedHasManyRemove` writes through a direct,
-    bounded child-FK update instead of the generic whole-collection-replace
-    write path. See this module's docstring for why each override exists.
+    bounded update (a child-FK write, or an association-table insert/delete
+    for a many-to-many relationship) instead of the generic
+    whole-collection-replace write path. See this module's docstring for
+    why each override exists.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -186,10 +257,10 @@ class PaginatedRelationsModelView(ModelView):
 
         Deliberately only checks that the relationship *exists* -- that's
         all that's knowable this early, before the foreign view (needed to
-        confirm it points at the right child model, and that the FK is
-        single-column) is resolvable from `field.key` via the admin's view
-        registry. `pagination.child_fk_column` still performs that fuller
-        check lazily, at first request.
+        confirm it points at the right child model, and that its key is
+        single-column on each side) is resolvable from `field.key` via the
+        admin's view registry. `pagination.resolve_relationship` still
+        performs that fuller check lazily, at first request.
         """
         relationships = sa_inspect(self.model).relationships.keys()
         for field in self.fields:
@@ -376,7 +447,7 @@ class PaginatedRelationsModelView(ModelView):
         `setattr`'d onto `obj` at all (that would mean assigning a plain
         list to a SQLAlchemy relationship, which *replaces* the whole
         collection). On edit, the parent's pk is already known, so the
-        add/remove happens immediately via direct child-FK writes. On
+        add/remove happens immediately via `_add_or_remove_children`. On
         create, `obj` has no pk yet (not flushed) -- the pending writes are
         stashed on `request.state` for `after_create` to apply once it does.
         """
@@ -390,14 +461,14 @@ class PaginatedRelationsModelView(ModelView):
                     pending.append((field, child_pks))
                     continue
                 foreign_view = self._find_foreign_view(field.key)  # type: ignore[attr-defined]
-                child_col = child_fk_column(
+                mapping = resolve_relationship(
                     self.model, field.relationship_name, foreign_view.model
                 )
                 parent_pk = await self.get_pk_value(request, obj)
                 await _add_or_remove_children(
                     request,
                     foreign_view,
-                    child_col,
+                    mapping,
                     parent_pk,
                     child_pks,
                     relate=isinstance(field, PaginatedHasMany),
@@ -432,13 +503,13 @@ class PaginatedRelationsModelView(ModelView):
         parent_pk = await self.get_pk_value(request, obj)
         for field, child_pks in pending:
             foreign_view = self._find_foreign_view(field.key)  # type: ignore[attr-defined]
-            child_col = child_fk_column(
+            mapping = resolve_relationship(
                 self.model, field.relationship_name, foreign_view.model
             )
             await _add_or_remove_children(
                 request,
                 foreign_view,
-                child_col,
+                mapping,
                 parent_pk,
                 child_pks,
                 relate=isinstance(field, PaginatedHasMany),

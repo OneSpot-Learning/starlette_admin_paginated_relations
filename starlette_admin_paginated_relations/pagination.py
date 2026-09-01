@@ -13,6 +13,9 @@ mirrors the pagination style already used elsewhere in this codebase.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Any
+
 import anyio
 import sqlakeyset
 import sqlakeyset.asyncio as sqlakeyset_asyncio
@@ -26,21 +29,58 @@ from starlette.requests import Request
 
 class PaginationConfigError(ValueError):
     """Raised when a `PaginatedHasMany` field can't be mapped onto a real,
-    single-column SQLAlchemy relationship. Raised at request time (not at
-    field-declaration time) so the error message can reference the request's
-    view/field, and surfaces as a 400 rather than crashing the process."""
+    single-column-keyed SQLAlchemy relationship (direct one-to-many, or
+    many-to-many through a `secondary=` table with a single-column key on
+    each side). Raised at request time (not at field-declaration time) so
+    the error message can reference the request's view/field, and surfaces
+    as a 400 rather than crashing the process."""
 
 
-def child_fk_column(parent_model: type, relationship_name: str, child_model: type):
-    """Return the child-side FK `Column` for `parent_model.<relationship_name>`.
+@dataclass(frozen=True)
+class RelationshipMapping:
+    """How `parent_model.<relationship_name>` is actually wired at the
+    database level -- everything `build_child_query` (read) and
+    `view_mixin.py`'s `_add_or_remove_children` (write) need to scope a
+    query, or a write, to one specific parent, without either needing to
+    special-case which kind of relationship it's looking at beyond checking
+    `is_many_to_many` once.
+
+    Direct one-to-many: `child_fk_column` is the child table's own FK column
+    pointing at the parent; `secondary`/`secondary_join`/
+    `secondary_parent_column` are all `None`.
+
+    Many-to-many (a `secondary=` table): `child_fk_column` is `None` --
+    there's no such column, the relationship lives entirely in the
+    association table. `secondary` is that table; `secondary_join` is the
+    ready-made join condition between it and the child table (straight from
+    `RelationshipProperty.secondaryjoin`, so `build_child_query` never has
+    to reconstruct it); `secondary_parent_column`/`secondary_child_column`
+    are the association table's own columns that must equal the parent's
+    and a given child's pk, respectively -- what
+    `view_mixin.py`'s add/remove write needs to insert/delete association
+    rows directly, without going through `secondary_join`.
+    """
+
+    is_many_to_many: bool
+    child_fk_column: Any | None
+    secondary: Any | None
+    secondary_join: Any | None
+    secondary_parent_column: Any | None
+    secondary_child_column: Any | None
+
+
+def resolve_relationship(
+    parent_model: type, relationship_name: str, child_model: type
+) -> RelationshipMapping:
+    """Resolve `parent_model.<relationship_name>` into a `RelationshipMapping`.
 
     Unlike a generic "find some relationship pointing at this model" scan,
     this looks up the *exact* relationship the field already names via
     `relationship_name` (a `PaginatedHasMany`/`PaginatedHasManyRemove`
     field's `.relationship_name`), so there's no ambiguity even when two
     relationships connect the same pair of models. Shared by the read side
-    (this module) and the write side (`view_mixin.py`'s direct FK add/remove
-    helper), so both agree on exactly which column governs the relationship.
+    (this module) and the write side (`view_mixin.py`'s add/remove helper),
+    so both agree on exactly how the relationship is wired.
     """
     mapper = sa_inspect(parent_model)
     try:
@@ -57,6 +97,29 @@ def child_fk_column(parent_model: type, relationship_name: str, child_model: typ
             f"{rel.mapper.class_.__name__!r}, not {child_model.__name__!r} "
             "(the model backing the view named by this field's `key`)."
         )
+
+    if rel.secondary is not None:
+        parent_pairs = list(rel.synchronize_pairs)
+        child_pairs = list(rel.secondary_synchronize_pairs)
+        if len(parent_pairs) != 1 or len(child_pairs) != 1:
+            raise PaginationConfigError(
+                f"{parent_model.__name__}.{relationship_name} is a "
+                "many-to-many relationship with a composite key on one "
+                "side of its association table. PaginatedHasMany currently "
+                "supports only a single-column key on each side; fall back "
+                "to the plain HasMany field for this relationship."
+            )
+        _parent_col, secondary_parent_col = parent_pairs[0]
+        _child_col, secondary_child_col = child_pairs[0]
+        return RelationshipMapping(
+            is_many_to_many=True,
+            child_fk_column=None,
+            secondary=rel.secondary,
+            secondary_join=rel.secondaryjoin,
+            secondary_parent_column=secondary_parent_col,
+            secondary_child_column=secondary_child_col,
+        )
+
     pairs = list(rel.synchronize_pairs)
     if len(pairs) != 1:
         raise PaginationConfigError(
@@ -66,7 +129,14 @@ def child_fk_column(parent_model: type, relationship_name: str, child_model: typ
             "this relationship."
         )
     _parent_col, child_col = pairs[0]
-    return child_col
+    return RelationshipMapping(
+        is_many_to_many=False,
+        child_fk_column=child_col,
+        secondary=None,
+        secondary_join=None,
+        secondary_parent_column=None,
+        secondary_child_column=None,
+    )
 
 
 def _order_columns(foreign_view: object) -> tuple:
@@ -84,19 +154,31 @@ def build_child_query(
     foreign_view: object,
     parent_pk_value: object,
 ) -> Select:
-    """The base, ordered, FK-filtered `Select` for one page of children.
+    """The base, ordered, relationship-filtered `Select` for one page of
+    children -- a direct FK filter, or a join through the association table
+    for a many-to-many relationship.
 
     Built on top of `foreign_view.get_list_query(request)` rather than a
     bare `select(child_model)`, so any scoping a view already applies there
     (tenant filters, soft-delete filters, access control, ...) still applies
     here -- pagination must never become a side door around it.
     """
-    child_col = child_fk_column(parent_model, relationship_name, foreign_view.model)
-    stmt = (
-        foreign_view.get_list_query(request)
-        .where(child_col == parent_pk_value)
-        .distinct()
-    )
+    mapping = resolve_relationship(parent_model, relationship_name, foreign_view.model)
+    base = foreign_view.get_list_query(request)
+    if mapping.is_many_to_many:
+        # Without this join, `.where(secondary_parent_column == ...)` would
+        # reference a table absent from the FROM clause -- SQLAlchemy would
+        # silently add it as an implicit cross join instead of raising,
+        # matching *every* child row against *any* row in the association
+        # table for this parent. That's the exact "every child shows up for
+        # every parent" bug this join exists to prevent.
+        stmt = (
+            base.join(mapping.secondary, mapping.secondary_join)
+            .where(mapping.secondary_parent_column == parent_pk_value)
+            .distinct()
+        )
+    else:
+        stmt = base.where(mapping.child_fk_column == parent_pk_value).distinct()
     return stmt.order_by(*_order_columns(foreign_view))
 
 

@@ -43,8 +43,10 @@ Prev/Next (see `static/plugins/paginated-relations/js/paginated_relation.js`).
 * **SQLAlchemy only.** `pagination.py` uses `sqlalchemy.inspect(...)
   .relationships[...]` and `foreign_view.get_list_query`/`._pk_column`,
   which are specific to `starlette_admin.contrib.sqla`.
-* **Single-column foreign keys only.** A composite FK raises
-  `PaginationConfigError` at request time; use plain `HasMany` for those.
+* **Single-column keys only.** Both a direct one-to-many (a composite FK)
+  and a many-to-many through a `secondary=` table (a composite key on
+  either side of the association table) raise `PaginationConfigError` at
+  request time; use plain `HasMany` for those.
 * **Export.** A CSV/Excel/JSON row still needs the full related collection
   to represent it, which is exactly the cost this field avoids elsewhere, so
   `exclude_from_export` stays `True`. Pass `exclude_from_export=False`
